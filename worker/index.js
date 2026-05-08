@@ -45,102 +45,156 @@ async function handleMarket(request, env) {
 }
 
 async function fetchQQQData(period, env) {
-  const rangeMap = { '1M': '1mo', '3M': '3mo', '1Y': '1y', '3Y': '3y' };
-  const intervalMap = { '1M': '1d', '3M': '1d', '1Y': '1wk', '3Y': '1mo' };
-  const range = rangeMap[period] || '1mo';
+  const rangeMap     = { '1M': '1mo', '3M': '3mo', '1Y': '1y',  '3Y': '3y'  };
+  const intervalMap  = { '1M': '1h',  '3M': '1d',  '1Y': '1wk', '3Y': '1mo' };
+  const range    = rangeMap[period]    || '1mo';
   const interval = intervalMap[period] || '1d';
-  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/QQQ?range=${range}&interval=${interval}&includePrePost=false`;
 
-  let trend = [];
+  let trend        = [];
   let currentPrice = 0;
-  let change = 0;
-  let changePct = 0;
-  let high52 = 0;
-  let low52 = 0;
-  let volume = '--';
+  let prevClose    = 0;
+  let change       = 0;
+  let changePct    = 0;
+  let high52       = 0;
+  let low52        = 0;
+  let volume       = '--';
 
   try {
-    const yahooRes = await fetch(yahooUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (yahooRes.ok) {
-      const priceData = await yahooRes.json();
-      const result = priceData?.chart?.result?.[0];
+    // Yahoo Finance — chart endpoint with split/div events for correct prices
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/QQQ?range=${range}&interval=${interval}&includePrePost=false&events=div%2Csplit&corsDomain=finance.yahoo.com`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'application/json',
+        'Referer': 'https://finance.yahoo.com',
+      }
+    });
+
+    if (res.ok) {
+      const d = await res.json();
+      const result = d?.chart?.result?.[0];
       if (result) {
-        const meta = result.meta;
-        const timestamps = result.timestamp || [];
-        const closes = result.indicators?.quote?.[0]?.close || [];
-        currentPrice = meta.regularMarketPrice || 0;
-        const prevClose = meta.chartPreviousClose || meta.previousClose || currentPrice;
-        change = parseFloat((currentPrice - prevClose).toFixed(2));
-        changePct = parseFloat(((change / prevClose) * 100).toFixed(2));
-        high52 = meta.fiftyTwoWeekHigh || 0;
-        low52 = meta.fiftyTwoWeekLow || 0;
+        const meta       = result.meta        || {};
+        const timestamps = result.timestamp   || [];
+        const adjCloses  = result.indicators?.adjclose?.[0]?.adjclose || [];
+        const rawCloses  = result.indicators?.quote?.[0]?.close       || [];
+        const closes     = adjCloses.length > 0 ? adjCloses : rawCloses;
+
+        // ── 当前价格（实时）──
+        currentPrice = parseFloat((meta.regularMarketPrice || 0).toFixed(2));
+
+        // ── 昨收：优先用 regularMarketPreviousClose ──
+        // 这是 Yahoo 明确标注的"前收盘价"，和 Google Finance 一致
+        prevClose = parseFloat((
+          meta.regularMarketPreviousClose ||
+          meta.previousClose ||
+          meta.chartPreviousClose ||
+          currentPrice
+        ).toFixed(2));
+
+        change    = parseFloat((currentPrice - prevClose).toFixed(2));
+        changePct = prevClose > 0
+          ? parseFloat(((change / prevClose) * 100).toFixed(2))
+          : 0;
+
+        high52 = parseFloat((meta.fiftyTwoWeekHigh || 0).toFixed(2));
+        low52  = parseFloat((meta.fiftyTwoWeekLow  || 0).toFixed(2));
         volume = formatVolume(meta.regularMarketVolume || 0);
+
+        // ── 趋势数组 ──
         trend = timestamps.map((ts, i) => {
-          const date = new Date(ts * 1000);
-          return { date: `${date.getMonth()+1}/${date.getDate()}`, price: parseFloat((closes[i] || 0).toFixed(2)) };
-        }).filter(t => t.price > 0);
+          const p = closes[i];
+          if (!p || p <= 0) return null;
+          const dt = new Date(ts * 1000);
+          // 小时数据显示 "5/8 14:00"，日/周/月数据显示 "5/8"
+          const dateStr = interval === '1h'
+            ? `${dt.getMonth()+1}/${dt.getDate()} ${dt.getHours()}:00`
+            : `${dt.getMonth()+1}/${dt.getDate()}`;
+          return { date: dateStr, price: parseFloat(p.toFixed(2)) };
+        }).filter(Boolean);
       }
     }
-  } catch(e) {}
+  } catch (e) {
+    // Yahoo failed — AI will search for everything
+  }
 
-  const priceContext = currentPrice > 0
-    ? `Current QQQ price is $${currentPrice}, change ${change} (${changePct}%), 52-week high $${high52}, low $${low52}.`
-    : '';
+  // ── AI: 只搜索技术指标和宏观数据，价格用 Yahoo 的真实数据 ──
+  const priceCtx = currentPrice > 0
+    ? `I already have accurate QQQ price data from Yahoo Finance:
+       Price: $${currentPrice}, Previous close: $${prevClose}, Change: $${change} (${changePct}%), 52wk high: $${high52}, 52wk low: $${low52}.
+       DO NOT search for price. Only search for the indicators below.`
+    : 'Search for current QQQ ETF price and all indicators below.';
 
-  const prompt = `${priceContext} Search for these current market indicators and return ONLY a raw JSON object (no markdown, no backticks):
-- VIX index current value
-- US 10-year treasury yield
-- QQQ P/E ratio
-- QQQ RSI 14-day value
-- MACD signal for QQQ (bullish/bearish/neutral)
-- QQQ 20-day moving average
-- QQQ 200-day moving average
+  const prompt = `${priceCtx}
 
-Return exactly this JSON:
-{"price":${currentPrice||0},"change":${change||0},"changePct":${changePct||0},"high52":${high52||0},"low52":${low52||0},"volume":"${volume||'--'}","vix":number,"bond10y":number,"pe":number,"rsi":number,"macd":"bullish|bearish|neutral","ma20":number,"ma200":number}`;
+Search for ONLY these indicators:
+1. VIX index current value
+2. US 10-year treasury yield (%)
+3. QQQ trailing P/E ratio
+4. QQQ 14-day RSI
+5. QQQ MACD signal: bullish, bearish, or neutral
+6. QQQ 20-day moving average price
+7. QQQ 200-day moving average price
+
+Return ONLY this raw JSON, no markdown, no extra text:
+{"price":${currentPrice},"change":${change},"changePct":${changePct},"high52":${high52},"low52":${low52},"volume":"${volume}","vix":number,"bond10y":number,"pe":number,"rsi":number,"macd":"bullish|bearish|neutral","ma20":number,"ma200":number}`;
 
   const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
     body: JSON.stringify({
       model: 'claude-opus-4-5',
-      max_tokens: 1000,
+      max_tokens: 800,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{ role: 'user', content: prompt }]
     })
   });
 
-  if (!aiRes.ok) throw new Error(`AI ${aiRes.status}`);
+  if (!aiRes.ok) throw new Error(`AI error ${aiRes.status}`);
+
   const aiData = await aiRes.json();
-  const text = (aiData.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('No JSON returned');
+  const text   = (aiData.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  const match  = text.match(/\{[\s\S]*?\}/);
+  if (!match) throw new Error('No JSON in AI response');
+
   const parsed = JSON.parse(match[0]);
+
+  // 确保用 Yahoo 的精确价格覆盖 AI 可能返回的不准确值
   if (currentPrice > 0) {
-    parsed.price = currentPrice;
-    parsed.change = change;
+    parsed.price     = currentPrice;
+    parsed.change    = change;
     parsed.changePct = changePct;
-    parsed.high52 = high52;
-    parsed.low52 = low52;
-    parsed.volume = volume;
+    parsed.high52    = high52;
+    parsed.low52     = low52;
+    parsed.volume    = volume;
   }
-  parsed.trend = trend;
-  parsed.period = period;
+
+  parsed.trend     = trend;
+  parsed.period    = period;
   parsed.fetchedAt = new Date().toISOString();
   return parsed;
 }
 
 function formatVolume(vol) {
-  if (vol >= 1000000) return (vol / 1000000).toFixed(1) + 'M';
-  if (vol >= 1000) return (vol / 1000).toFixed(0) + 'K';
+  if (vol >= 1e9) return (vol / 1e9).toFixed(1) + 'B';
+  if (vol >= 1e6) return (vol / 1e6).toFixed(1) + 'M';
+  if (vol >= 1e3) return (vol / 1e3).toFixed(0) + 'K';
   return String(vol);
 }
 
+// ── KV rate limiting ──────────────────────────────────────
 const todayKey = ip => `usage:${ip}:${new Date().toISOString().slice(0, 10)}`;
 const paidKey  = ip => `paid:${ip}`;
 
 async function getUsage(ip, env) {
-  const [raw, paidRaw] = await Promise.all([env.KV.get(todayKey(ip)), env.KV.get(paidKey(ip))]);
+  const [raw, paidRaw] = await Promise.all([
+    env.KV.get(todayKey(ip)),
+    env.KV.get(paidKey(ip))
+  ]);
   const isPaid = paidRaw === 'true';
   return { used: parseInt(raw || '0'), limit: isPaid ? PAID_LIMIT : FREE_LIMIT, isPaid };
 }
@@ -161,15 +215,18 @@ async function decrementUsage(ip, env) {
   }
 }
 
+// ── Stripe ────────────────────────────────────────────────
 async function handleCheckout(request, env) {
-  const ip = getIP(request);
+  const ip     = getIP(request);
   const origin = request.headers.get('Origin') || `https://${env.GITHUB_PAGES_DOMAIN}`;
   const params = new URLSearchParams({
-    'mode': 'subscription', 'line_items[0][price]': env.STRIPE_PRICE_ID,
+    'mode': 'subscription',
+    'line_items[0][price]': env.STRIPE_PRICE_ID,
     'line_items[0][quantity]': '1',
     'success_url': `${origin}/?session_id={CHECKOUT_SESSION_ID}&status=success`,
-    'cancel_url': `${origin}/?status=cancelled`,
-    'metadata[ip]': ip, 'allow_promotion_codes': 'true',
+    'cancel_url':  `${origin}/?status=cancelled`,
+    'metadata[ip]': ip,
+    'allow_promotion_codes': 'true',
   });
   const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
@@ -183,7 +240,7 @@ async function handleCheckout(request, env) {
 
 async function handleWebhook(request, env) {
   const body = await request.text();
-  const sig = request.headers.get('stripe-signature');
+  const sig  = request.headers.get('stripe-signature');
   let event;
   try { event = await verifyStripe(body, sig, env.STRIPE_WEBHOOK_SECRET); }
   catch (e) { return new Response(`Webhook error: ${e.message}`, { status: 400 }); }
@@ -214,17 +271,18 @@ async function handleVerify(request, env) {
 }
 
 async function verifyStripe(body, sigHeader, secret) {
-  const parts = Object.fromEntries(sigHeader.split(',').map(p => p.split('=')));
+  const parts   = Object.fromEntries(sigHeader.split(',').map(p => p.split('=')));
   const payload = `${parts.t}.${body}`;
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(payload));
-  const hex = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+  const enc     = new TextEncoder();
+  const key     = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig     = await crypto.subtle.sign('HMAC', key, enc.encode(payload));
+  const hex     = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
   if (hex !== parts.v1) throw new Error('Invalid signature');
   if (Math.floor(Date.now() / 1000) - parseInt(parts.t) > 300) throw new Error('Expired');
   return JSON.parse(body);
 }
 
+// ── Helpers ───────────────────────────────────────────────
 function getIP(req) {
   return req.headers.get('CF-Connecting-IP')
     || (req.headers.get('X-Forwarded-For') || '').split(',')[0].trim()
@@ -232,5 +290,8 @@ function getIP(req) {
 }
 
 function json(data, status = 200) {
-  return new Response(JSON.stringify(data), { status, headers: { ...CORS, 'Content-Type': 'application/json' } });
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...CORS, 'Content-Type': 'application/json' }
+  });
 }
