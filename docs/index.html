@@ -166,7 +166,7 @@ select{width:100%;padding:9px 12px;background:var(--bg3);border:.5px solid var(-
   </div>
   <div class="metric-grid">
     <div class="metric"><div class="label">QQQ 最新价</div><div class="value" id="m-price">--</div><div class="sub" id="m-chg">--</div></div>
-    <div class="metric"><div class="label">涨跌幅</div><div class="value" id="m-pct">--</div><div class="sub neutral" id="m-vol">成交量 --</div></div>
+    <div class="metric"><div class="label" id="pct-label">涨跌幅</div><div class="value" id="m-pct">--</div><div class="sub neutral" id="m-vol">成交量 --</div></div>
     <div class="metric"><div class="label">52周高点</div><div class="value" id="m-high">--</div><div class="sub down" id="m-high-pct">--</div></div>
     <div class="metric"><div class="label">52周低点</div><div class="value" id="m-low">--</div><div class="sub up" id="m-low-pct">--</div></div>
   </div>
@@ -356,9 +356,19 @@ function setPeriod(p,btn){
 
 function applyData(d){
   const {price:p,change:chg,changePct:pct,high52:h,low52:l,vix,bond10y,pe,volume,rsi,macd,ma20,ma200}=d;
+  const periodChg = d.periodChg ?? chg;
+  const periodPct = d.periodPct ?? pct;
+  const periodLabels = {'1M':'30天涨跌','3M':'3月涨跌','1Y':'1年涨跌','3Y':'3年涨跌','5Y':'5年涨跌'};
+
   g('m-price').textContent='$'+p.toFixed(2);
   g('m-chg').textContent=(chg>=0?'+':'')+chg.toFixed(2);g('m-chg').className='sub '+(chg>=0?'up':'down');
-  g('m-pct').textContent=(pct>=0?'+':'')+pct.toFixed(2)+'%';g('m-pct').className='value '+(pct>=0?'up':'down');
+
+  // 涨跌幅卡片：显示时间段涨幅
+  g('pct-label').textContent = periodLabels[period] || '涨跌幅';
+  g('m-pct').textContent=(periodPct>=0?'+':'')+periodPct.toFixed(2)+'%';
+  g('m-pct').className='value '+(periodPct>=0?'up':'down');
+  // 副标题显示起始价
+  g('m-vol').textContent=d.firstPrice?`起始 $${d.firstPrice.toFixed(2)}`:`成交量 ${volume||'--'}`;
   g('m-vol').textContent='成交量 '+(volume||'--');
   g('m-high').textContent='$'+h.toFixed(2);g('m-high-pct').textContent=((p-h)/h*100).toFixed(1)+'% 距高点';
   g('m-low').textContent='$'+l.toFixed(2);g('m-low-pct').textContent='+'+((p-l)/l*100).toFixed(1)+'% 距低点';
