@@ -339,7 +339,7 @@ async function doRefresh(){
 function setPeriod(p,btn){
   period=p;document.querySelectorAll('.period-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
   g('chart-period-label').textContent='价格走势 — '+PL[p];
-  if(data)renderPrice(data);else doRefresh();
+  doRefresh();
 }
 
 function applyData(d){
