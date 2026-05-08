@@ -1,9 +1,3 @@
-// ═══════════════════════════════════════════════════════════
-//  QQQ Platform — Cloudflare Worker
-//  Routes: /api/market  /api/check-limit
-//          /api/stripe/checkout  /api/stripe/webhook  /api/stripe/verify
-// ═══════════════════════════════════════════════════════════
-
 const FREE_LIMIT  = 2;
 const PAID_LIMIT  = 50;
 
@@ -16,39 +10,31 @@ const CORS = {
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
-
     const { pathname } = new URL(request.url);
-
     if (pathname === '/api/check-limit')      return handleCheckLimit(request, env);
     if (pathname === '/api/market')           return handleMarket(request, env);
     if (pathname === '/api/stripe/checkout')  return handleCheckout(request, env);
     if (pathname === '/api/stripe/webhook')   return handleWebhook(request, env);
     if (pathname === '/api/stripe/verify')    return handleVerify(request, env);
-
     return json({ error: 'Not found' }, 404);
   }
 };
 
-// ── GET /api/check-limit ─────────────────────────────────
 async function handleCheckLimit(request, env) {
   const ip = getIP(request);
   const { used, limit, isPaid } = await getUsage(ip, env);
   return json({ used, limit, remaining: limit - used, isPaid });
 }
 
-// ── POST /api/market ─────────────────────────────────────
 async function handleMarket(request, env) {
   const ip = getIP(request);
   const body = await request.json().catch(() => ({}));
   const period = body.period || '1M';
-
   const { used, limit, isPaid } = await getUsage(ip, env);
   if (used >= limit) {
     return json({ error: 'RATE_LIMIT', message: `今日${isPaid?'专业版':'免费'}额度（${limit}次）已用完`, used, limit, isPaid }, 429);
   }
-
   await incrementUsage(ip, env);
-
   try {
     const data = await fetchQQQData(period, env);
     return json({ success: true, data, used: used + 1, limit });
@@ -58,18 +44,10 @@ async function handleMarket(request, env) {
   }
 }
 
-// ── Anthropic API ────────────────────────────────────────
 async function fetchQQQData(period, env) {
   const label = { '1M':'30天', '3M':'3个月', '1Y':'1年', '3Y':'3年' }[period] || '30天';
-  const pts   = { '1M': 22,   '3M': 60,     '1Y': 12,   '3Y': 12   }[period] || 22;
-
-  const prompt = `Search for current QQQ ETF data right now. Return ONLY a raw JSON object — no markdown, no backticks, no explanation.
-
-Find: current price, today's change & %, 52-week high & low, VIX, US 10Y yield, QQQ P/E, volume, RSI(14), MACD signal, MA20, MA200, and ~${pts} historical closing prices for the past ${label}.
-
-Return exactly:
-{"price":number,"change":number,"changePct":number,"high52":number,"low52":number,"vix":number,"bond10y":number,"pe":number,"volume":"string","rsi":number,"macd":"bullish|bearish|neutral","ma20":number,"ma200":number,"trend":[{"date":"MM/DD","price":number}],"period":"${period}"}`;
-
+  const pts   = { '1M': 22, '3M': 60, '1Y': 12, '3Y': 12 }[period] || 22;
+  const prompt = `Search for current QQQ ETF data right now. Return ONLY a raw JSON object — no markdown, no backticks, no explanation.\n\nFind: current price, today's change & %, 52-week high & low, VIX, US 10Y yield, QQQ P/E, volume, RSI(14), MACD signal, MA20, MA200, and ~${pts} historical closing prices for the past ${label}.\n\nReturn exactly:\n{"price":number,"change":number,"changePct":number,"high52":number,"low52":number,"vix":number,"bond10y":number,"pe":number,"volume":"string","rsi":number,"macd":"bullish|bearish|neutral","ma20":number,"ma200":number,"trend":[{"date":"MM/DD","price":number}],"period":"${period}"}`;
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -84,9 +62,7 @@ Return exactly:
       messages: [{ role: 'user', content: prompt }]
     })
   });
-
   if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`);
-
   const apiData = await res.json();
   const text = (apiData.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
   const match = text.match(/\{[\s\S]*\}/);
@@ -96,7 +72,6 @@ Return exactly:
   return parsed;
 }
 
-// ── KV helpers ───────────────────────────────────────────
 const todayKey = ip => `usage:${ip}:${new Date().toISOString().slice(0, 10)}`;
 const paidKey  = ip => `paid:${ip}`;
 
@@ -122,11 +97,9 @@ async function decrementUsage(ip, env) {
   }
 }
 
-// ── Stripe checkout ──────────────────────────────────────
 async function handleCheckout(request, env) {
-  const ip     = getIP(request);
+  const ip = getIP(request);
   const origin = request.headers.get('Origin') || `https://${env.GITHUB_PAGES_DOMAIN}`;
-
   const params = new URLSearchParams({
     'mode': 'subscription',
     'line_items[0][price]': env.STRIPE_PRICE_ID,
@@ -136,7 +109,6 @@ async function handleCheckout(request, env) {
     'metadata[ip]': ip,
     'allow_promotion_codes': 'true',
   });
-
   const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -147,14 +119,12 @@ async function handleCheckout(request, env) {
   return json({ url: session.url });
 }
 
-// ── Stripe webhook ───────────────────────────────────────
 async function handleWebhook(request, env) {
   const body = await request.text();
   const sig  = request.headers.get('stripe-signature');
   let event;
   try { event = await verifyStripe(body, sig, env.STRIPE_WEBHOOK_SECRET); }
   catch (e) { return new Response(`Webhook error: ${e.message}`, { status: 400 }); }
-
   if (event.type === 'checkout.session.completed') {
     const ip = event.data.object?.metadata?.ip;
     if (ip) await env.KV.put(paidKey(ip), 'true', { expirationTtl: 90 * 86400 });
@@ -166,16 +136,13 @@ async function handleWebhook(request, env) {
   return new Response('ok');
 }
 
-// ── Stripe verify session ────────────────────────────────
 async function handleVerify(request, env) {
   const sessionId = new URL(request.url).searchParams.get('session_id');
   if (!sessionId) return json({ error: 'Missing session_id' }, 400);
-
   const res = await fetch(`https://api.stripe.com/v1/checkout/sessions/${sessionId}`, {
     headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}` }
   });
   const session = await res.json();
-
   if (session.payment_status === 'paid' || session.status === 'complete') {
     const ip = getIP(request);
     await env.KV.put(paidKey(ip), 'true', { expirationTtl: 90 * 86400 });
@@ -184,7 +151,6 @@ async function handleVerify(request, env) {
   return json({ success: false, isPaid: false });
 }
 
-// ── Stripe HMAC verify ───────────────────────────────────
 async function verifyStripe(body, sigHeader, secret) {
   const parts = Object.fromEntries(sigHeader.split(',').map(p => p.split('=')));
   const payload = `${parts.t}.${body}`;
@@ -197,12 +163,12 @@ async function verifyStripe(body, sigHeader, secret) {
   return JSON.parse(body);
 }
 
-// ── Helpers ──────────────────────────────────────────────
 function getIP(req) {
   return req.headers.get('CF-Connecting-IP')
     || (req.headers.get('X-Forwarded-For') || '').split(',')[0].trim()
     || '0.0.0.0';
 }
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { ...CORS, 'Content-Type': 'application/json' } });
 }
