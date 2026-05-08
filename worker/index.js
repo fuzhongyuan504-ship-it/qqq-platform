@@ -143,6 +143,18 @@ async function fetchQQQData(period, env) {
             : `${dt.getMonth()+1}/${dt.getDate()}`;
           return { date: dateStr, price: parseFloat(p.toFixed(2)) };
         }).filter(Boolean);
+
+        // ── 时间段涨幅：首价 vs 末价 ──
+        if (trend.length >= 2) {
+          const firstPrice = trend[0].price;
+          const lastPrice  = trend[trend.length - 1].price;
+          const periodChg  = parseFloat((lastPrice - firstPrice).toFixed(2));
+          const periodPct  = parseFloat(((periodChg / firstPrice) * 100).toFixed(2));
+          // attach to parsed result later
+          trend._firstPrice  = firstPrice;
+          trend._periodChg   = periodChg;
+          trend._periodPct   = periodPct;
+        }
       }
     }
   } catch (e) {
@@ -204,9 +216,12 @@ Return ONLY this raw JSON, no markdown, no extra text:
     parsed.volume    = volume;
   }
 
-  parsed.trend     = trend;
-  parsed.period    = period;
-  parsed.fetchedAt = new Date().toISOString();
+  parsed.trend       = trend;
+  parsed.periodChg   = trend._periodChg  ?? parsed.change;
+  parsed.periodPct   = trend._periodPct  ?? parsed.changePct;
+  parsed.firstPrice  = trend._firstPrice ?? parsed.price;
+  parsed.period      = period;
+  parsed.fetchedAt   = new Date().toISOString();
   return parsed;
 }
 
