@@ -87,11 +87,20 @@ async function fetchQQQData(period, env) {
         // ── 当前价格（实时）──
         currentPrice = parseFloat((meta.regularMarketPrice || 0).toFixed(2));
 
-        // Use regularMarketPreviousClose — this is the correct prior day close
-        // that matches what Google Finance / Bloomberg show
+        // After market close, regularMarketPrice = regularMarketPreviousClose (same value)
+        // So we use regularMarketOpen to show today's intraday move,
+        // falling back to regularMarketPreviousClose for pre-market
+        const todayOpen = meta.regularMarketOpen || 0;
         prevClose = parseFloat((meta.regularMarketPreviousClose || currentPrice).toFixed(2));
-        change    = parseFloat((currentPrice - prevClose).toFixed(2));
-        changePct = prevClose > 0 ? parseFloat(((change / prevClose) * 100).toFixed(2)) : 0;
+
+        // If market is closed and price = prevClose, use open vs close for today's change
+        if (Math.abs(currentPrice - prevClose) < 0.01 && todayOpen > 0) {
+          change    = parseFloat((currentPrice - todayOpen).toFixed(2));
+          changePct = parseFloat(((change / todayOpen) * 100).toFixed(2));
+        } else {
+          change    = parseFloat((currentPrice - prevClose).toFixed(2));
+          changePct = prevClose > 0 ? parseFloat(((change / prevClose) * 100).toFixed(2)) : 0;
+        }
 
         high52 = parseFloat((meta.fiftyTwoWeekHigh || 0).toFixed(2));
         low52  = parseFloat((meta.fiftyTwoWeekLow  || 0).toFixed(2));
