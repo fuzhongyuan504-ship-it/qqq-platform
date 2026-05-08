@@ -64,7 +64,45 @@ async function fetchQQQData(period, env) {
   let volume       = '--';
 
   try {
-    // Yahoo Finance — chart endpoint with split/div events for correct prices
+    // Step 1: Get accurate today's price change from quote endpoint
+    const quoteUrl = `https://query1.finance.yahoo.com/v8/finance/chart/QQQ?range=5d&interval=1d&includePrePost=false`;
+    const quoteRes = await fetch(quoteUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'application/json',
+        'Referer': 'https://finance.yahoo.com',
+      }
+    });
+    if (quoteRes.ok) {
+      const qd = await quoteRes.json();
+      const qr = qd?.chart?.result?.[0];
+      if (qr) {
+        const qmeta = qr.meta;
+        currentPrice = parseFloat((qmeta.regularMarketPrice || 0).toFixed(2));
+        high52  = parseFloat((qmeta.fiftyTwoWeekHigh || 0).toFixed(2));
+        low52   = parseFloat((qmeta.fiftyTwoWeekLow  || 0).toFixed(2));
+        volume  = formatVolume(qmeta.regularMarketVolume || 0);
+
+        // Get yesterday's actual close from the 5d series (second to last close)
+        const closes5d = qr.indicators?.adjclose?.[0]?.adjclose || qr.indicators?.quote?.[0]?.close || [];
+        const validCloses = closes5d.filter(c => c && c > 0);
+        if (validCloses.length >= 2) {
+          // yesterday = second to last, today = last
+          const todayClose = validCloses[validCloses.length - 1];
+          const yestClose  = validCloses[validCloses.length - 2];
+          currentPrice = parseFloat(todayClose.toFixed(2));
+          prevClose    = parseFloat(yestClose.toFixed(2));
+        } else {
+          prevClose = currentPrice;
+        }
+        change    = parseFloat((currentPrice - prevClose).toFixed(2));
+        changePct = prevClose > 0 ? parseFloat(((change / prevClose) * 100).toFixed(2)) : 0;
+      }
+    }
+  } catch(e) {}
+
+  try {
+    // Step 2: Get historical trend data for the chart
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/QQQ?range=${yahooRange}&interval=${yahooInterval}&includePrePost=false&events=div%2Csplit&corsDomain=finance.yahoo.com`;
     const res = await fetch(url, {
       headers: {
@@ -84,34 +122,22 @@ async function fetchQQQData(period, env) {
         const rawCloses  = result.indicators?.quote?.[0]?.close       || [];
         const closes     = adjCloses.length > 0 ? adjCloses : rawCloses;
 
-        // ── 当前价格（实时）──
-        currentPrice = parseFloat((meta.regularMarketPrice || 0).toFixed(2));
-
-        // After market close, regularMarketPrice = regularMarketPreviousClose (same value)
-        // So we use regularMarketOpen to show today's intraday move,
-        // falling back to regularMarketPreviousClose for pre-market
-        const todayOpen = meta.regularMarketOpen || 0;
-        prevClose = parseFloat((meta.regularMarketPreviousClose || currentPrice).toFixed(2));
-
-        // If market is closed and price = prevClose, use open vs close for today's change
-        if (Math.abs(currentPrice - prevClose) < 0.01 && todayOpen > 0) {
-          change    = parseFloat((currentPrice - todayOpen).toFixed(2));
-          changePct = parseFloat(((change / todayOpen) * 100).toFixed(2));
-        } else {
-          change    = parseFloat((currentPrice - prevClose).toFixed(2));
-          changePct = prevClose > 0 ? parseFloat(((change / prevClose) * 100).toFixed(2)) : 0;
+        // Only update price/change if step 1 failed
+        if (currentPrice === 0) {
+          currentPrice = parseFloat((meta.regularMarketPrice || 0).toFixed(2));
+          prevClose    = parseFloat((meta.regularMarketPreviousClose || currentPrice).toFixed(2));
+          change       = parseFloat((currentPrice - prevClose).toFixed(2));
+          changePct    = prevClose > 0 ? parseFloat(((change / prevClose) * 100).toFixed(2)) : 0;
+          high52       = parseFloat((meta.fiftyTwoWeekHigh || 0).toFixed(2));
+          low52        = parseFloat((meta.fiftyTwoWeekLow  || 0).toFixed(2));
+          volume       = formatVolume(meta.regularMarketVolume || 0);
         }
-
-        high52 = parseFloat((meta.fiftyTwoWeekHigh || 0).toFixed(2));
-        low52  = parseFloat((meta.fiftyTwoWeekLow  || 0).toFixed(2));
-        volume = formatVolume(meta.regularMarketVolume || 0);
 
         // ── 趋势数组 ──
         trend = timestamps.map((ts, i) => {
           const p = closes[i];
           if (!p || p <= 0) return null;
           const dt = new Date(ts * 1000);
-          // 小时数据显示 "5/8 14:00"，日/周/月数据显示 "5/8"
           const dateStr = interval === '1h'
             ? `${dt.getMonth()+1}/${dt.getDate()} ${dt.getHours()}:00`
             : `${dt.getMonth()+1}/${dt.getDate()}`;
