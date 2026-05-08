@@ -45,31 +45,95 @@ async function handleMarket(request, env) {
 }
 
 async function fetchQQQData(period, env) {
-  const label = { '1M':'30天', '3M':'3个月', '1Y':'1年', '3Y':'3年' }[period] || '30天';
-  const pts   = { '1M': 22, '3M': 60, '1Y': 12, '3Y': 12 }[period] || 22;
-  const prompt = `Search for current QQQ ETF data right now. Return ONLY a raw JSON object — no markdown, no backticks, no explanation.\n\nFind: current price, today's change & %, 52-week high & low, VIX, US 10Y yield, QQQ P/E, volume, RSI(14), MACD signal, MA20, MA200, and ~${pts} historical closing prices for the past ${label}.\n\nReturn exactly:\n{"price":number,"change":number,"changePct":number,"high52":number,"low52":number,"vix":number,"bond10y":number,"pe":number,"volume":"string","rsi":number,"macd":"bullish|bearish|neutral","ma20":number,"ma200":number,"trend":[{"date":"MM/DD","price":number}],"period":"${period}"}`;
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  const rangeMap = { '1M': '1mo', '3M': '3mo', '1Y': '1y', '3Y': '3y' };
+  const intervalMap = { '1M': '1d', '3M': '1d', '1Y': '1wk', '3Y': '1mo' };
+  const range = rangeMap[period] || '1mo';
+  const interval = intervalMap[period] || '1d';
+  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/QQQ?range=${range}&interval=${interval}&includePrePost=false`;
+
+  let trend = [];
+  let currentPrice = 0;
+  let change = 0;
+  let changePct = 0;
+  let high52 = 0;
+  let low52 = 0;
+  let volume = '--';
+
+  try {
+    const yahooRes = await fetch(yahooUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (yahooRes.ok) {
+      const priceData = await yahooRes.json();
+      const result = priceData?.chart?.result?.[0];
+      if (result) {
+        const meta = result.meta;
+        const timestamps = result.timestamp || [];
+        const closes = result.indicators?.quote?.[0]?.close || [];
+        currentPrice = meta.regularMarketPrice || 0;
+        const prevClose = meta.chartPreviousClose || meta.previousClose || currentPrice;
+        change = parseFloat((currentPrice - prevClose).toFixed(2));
+        changePct = parseFloat(((change / prevClose) * 100).toFixed(2));
+        high52 = meta.fiftyTwoWeekHigh || 0;
+        low52 = meta.fiftyTwoWeekLow || 0;
+        volume = formatVolume(meta.regularMarketVolume || 0);
+        trend = timestamps.map((ts, i) => {
+          const date = new Date(ts * 1000);
+          return { date: `${date.getMonth()+1}/${date.getDate()}`, price: parseFloat((closes[i] || 0).toFixed(2)) };
+        }).filter(t => t.price > 0);
+      }
+    }
+  } catch(e) {}
+
+  const priceContext = currentPrice > 0
+    ? `Current QQQ price is $${currentPrice}, change ${change} (${changePct}%), 52-week high $${high52}, low $${low52}.`
+    : '';
+
+  const prompt = `${priceContext} Search for these current market indicators and return ONLY a raw JSON object (no markdown, no backticks):
+- VIX index current value
+- US 10-year treasury yield
+- QQQ P/E ratio
+- QQQ RSI 14-day value
+- MACD signal for QQQ (bullish/bearish/neutral)
+- QQQ 20-day moving average
+- QQQ 200-day moving average
+
+Return exactly this JSON:
+{"price":${currentPrice||0},"change":${change||0},"changePct":${changePct||0},"high52":${high52||0},"low52":${low52||0},"volume":"${volume||'--'}","vix":number,"bond10y":number,"pe":number,"rsi":number,"macd":"bullish|bearish|neutral","ma20":number,"ma200":number}`;
+
+  const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
+    headers: { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model: 'claude-opus-4-5',
-      max_tokens: 2000,
+      max_tokens: 1000,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{ role: 'user', content: prompt }]
     })
   });
-  if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`);
-  const apiData = await res.json();
-  const text = (apiData.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+
+  if (!aiRes.ok) throw new Error(`AI ${aiRes.status}`);
+  const aiData = await aiRes.json();
+  const text = (aiData.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) throw new Error('No JSON returned');
   const parsed = JSON.parse(match[0]);
+  if (currentPrice > 0) {
+    parsed.price = currentPrice;
+    parsed.change = change;
+    parsed.changePct = changePct;
+    parsed.high52 = high52;
+    parsed.low52 = low52;
+    parsed.volume = volume;
+  }
+  parsed.trend = trend;
+  parsed.period = period;
   parsed.fetchedAt = new Date().toISOString();
   return parsed;
+}
+
+function formatVolume(vol) {
+  if (vol >= 1000000) return (vol / 1000000).toFixed(1) + 'M';
+  if (vol >= 1000) return (vol / 1000).toFixed(0) + 'K';
+  return String(vol);
 }
 
 const todayKey = ip => `usage:${ip}:${new Date().toISOString().slice(0, 10)}`;
@@ -101,13 +165,11 @@ async function handleCheckout(request, env) {
   const ip = getIP(request);
   const origin = request.headers.get('Origin') || `https://${env.GITHUB_PAGES_DOMAIN}`;
   const params = new URLSearchParams({
-    'mode': 'subscription',
-    'line_items[0][price]': env.STRIPE_PRICE_ID,
+    'mode': 'subscription', 'line_items[0][price]': env.STRIPE_PRICE_ID,
     'line_items[0][quantity]': '1',
     'success_url': `${origin}/?session_id={CHECKOUT_SESSION_ID}&status=success`,
-    'cancel_url':  `${origin}/?status=cancelled`,
-    'metadata[ip]': ip,
-    'allow_promotion_codes': 'true',
+    'cancel_url': `${origin}/?status=cancelled`,
+    'metadata[ip]': ip, 'allow_promotion_codes': 'true',
   });
   const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
@@ -121,7 +183,7 @@ async function handleCheckout(request, env) {
 
 async function handleWebhook(request, env) {
   const body = await request.text();
-  const sig  = request.headers.get('stripe-signature');
+  const sig = request.headers.get('stripe-signature');
   let event;
   try { event = await verifyStripe(body, sig, env.STRIPE_WEBHOOK_SECRET); }
   catch (e) { return new Response(`Webhook error: ${e.message}`, { status: 400 }); }
